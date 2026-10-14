@@ -10,6 +10,33 @@ go install ./...
 go build -o bin/tipshow .
 ```
 
+## 桌面悬浮窗
+
+Rust 版置顶悬浮窗，方便盯着本机状态，不用反复敲命令。收起是一颗网速胶囊（实时上下行、CPU、内存），点击展开后可看进程、每个应用的上传下载、端口对应的程序，以及磁盘。窗口可拖拽，默认置顶。应用流量和端口在 macOS 上通过 `nettop` 采集。
+
+```bash
+cd float
+cargo run --release
+# 启动时直接展开详情
+cargo run --release -- --expanded
+```
+
+需要本机已安装 Rust。macOS 会加载系统里的黑体/冬青黑，Windows 用微软雅黑，Linux 用 Noto Sans CJK。
+
+### 界面
+
+总览看 CPU、内存、磁盘，以及当前流量最高的应用。
+
+![总览](docs/screenshots/overview.png)
+
+流量页按应用列出上传和下载，下面保留各网卡。
+
+![流量](docs/screenshots/traffic.png)
+
+端口页把本地端口、远端地址和对应程序放在一行。
+
+![端口](docs/screenshots/ports.png)
+
 ## 快速开始
 
 ```bash
@@ -67,6 +94,8 @@ tipshow disk du -p . --json
 │   ├── tools/        # 外部工具 catalog 与检测
 │   ├── runner/       # 安全 exec 封装
 │   └── output/       # 文本 / JSON 输出
+├── float/            # Rust 桌面悬浮窗
+└── docs/screenshots/ # 悬浮窗界面截图
 ```
 
 ## 开发路线
