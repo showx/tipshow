@@ -784,10 +784,24 @@ fn collect_windows() -> SecuritySample {
             };
         }
     };
-    let text = String::from_utf8_lossy(&output.stdout);
+    let text = decode_command_output(&output.stdout);
     let mut sample = parse_windows_report(&text);
+    match query_sc_services() {
+        Ok(text) => {
+            let rows = rows_from_sc(&text);
+            if !rows.is_empty() {
+                sample.services = rows;
+            }
+        }
+        Err(err) => {
+            if sample.services.is_empty() && sample.error.is_none() {
+                sample.error = Some(format!("读取服务失败: {err}"));
+            }
+        }
+    }
     if sample.av.is_empty() && sample.guards.is_empty() && sample.services.is_empty() {
-        let err = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let err = decode_command_output(&output.stderr);
+        let err = err.trim().to_string();
         if sample.error.is_none() {
             sample.error = Some(if err.is_empty() {
                 "没有读到杀毒软件和服务状态".into()
@@ -798,6 +812,189 @@ fn collect_windows() -> SecuritySample {
     }
     sample.ready = true;
     sample
+}
+
+#[cfg(target_os = "windows")]
+fn query_sc_services() -> Result<String, String> {
+    let mut command = Command::new("sc.exe");
+    command
+        .args(["query", "type=", "service", "state=", "all"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    hide_window(&mut command);
+    let output = command
+        .output()
+        .map_err(|err| format!("无法执行 sc.exe: {err}"))?;
+    let text = decode_command_output(&output.stdout);
+    if text.trim().is_empty() {
+        let err = decode_command_output(&output.stderr);
+        let err = err.trim();
+        return Err(if err.is_empty() {
+            format!("sc.exe 退出码 {}", output.status.code().unwrap_or(-1))
+        } else {
+            err.to_string()
+        });
+    }
+    Ok(text)
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn decode_command_output(bytes: &[u8]) -> String {
+    if bytes.starts_with(&[0xFF, 0xFE]) {
+        return decode_utf16(bytes, true);
+    }
+    if bytes.starts_with(&[0xFE, 0xFF]) {
+        return decode_utf16(bytes, false);
+    }
+    if looks_like_utf16_le(bytes) {
+        return decode_utf16(bytes, true);
+    }
+    String::from_utf8_lossy(bytes).into_owned()
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn looks_like_utf16_le(bytes: &[u8]) -> bool {
+    if bytes.len() < 8 || bytes.len() % 2 != 0 {
+        return false;
+    }
+    let sample = bytes.len().min(80);
+    let nuls = bytes[..sample]
+        .iter()
+        .skip(1)
+        .step_by(2)
+        .filter(|byte| **byte == 0)
+        .count();
+    nuls * 4 >= sample
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn decode_utf16(bytes: &[u8], little: bool) -> String {
+    let body = if (little && bytes.starts_with(&[0xFF, 0xFE]))
+        || (!little && bytes.starts_with(&[0xFE, 0xFF]))
+    {
+        &bytes[2..]
+    } else {
+        bytes
+    };
+    let units: Vec<u16> = body
+        .chunks_exact(2)
+        .map(|pair| {
+            if little {
+                u16::from_le_bytes([pair[0], pair[1]])
+            } else {
+                u16::from_be_bytes([pair[0], pair[1]])
+            }
+        })
+        .collect();
+    String::from_utf16_lossy(&units)
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn rows_from_sc(text: &str) -> Vec<CheckRow> {
+    let found = parse_sc_states(text);
+    if found.is_empty() {
+        return Vec::new();
+    }
+    let mut rows = Vec::new();
+    for (name, always) in SC_SERVICES {
+        match found
+            .iter()
+            .find(|(found_name, _, _)| found_name.eq_ignore_ascii_case(name))
+        {
+            Some((_, display, running)) => {
+                let state = if *running { "run" } else { "stop" };
+                rows.push(windows_service(name, state, &format!("|{display}")));
+            }
+            None if *always => rows.push(windows_service(name, "stop", "Missing|")),
+            None => {}
+        }
+    }
+    rows
+}
+
+#[cfg(any(target_os = "windows", test))]
+const SC_SERVICES: &[(&str, bool)] = &[
+    ("WinDefend", true),
+    ("WdNisSvc", false),
+    ("MDCoreSvc", false),
+    ("SecurityHealthService", true),
+    ("wscsvc", true),
+    ("Sense", false),
+    ("MpsSvc", true),
+    ("BFE", true),
+    ("wuauserv", true),
+    ("BITS", false),
+    ("EventLog", true),
+    ("Winmgmt", false),
+    ("Dhcp", false),
+    ("Dnscache", false),
+    ("WlanSvc", false),
+    ("BthServ", false),
+    ("Spooler", false),
+    ("LanmanServer", false),
+    ("TermService", false),
+    ("WinRM", false),
+    ("RemoteRegistry", false),
+    ("W32Time", false),
+    ("WSearch", false),
+    ("SysMain", false),
+    ("Schedule", false),
+    ("Audiosrv", false),
+    ("CryptSvc", false),
+    ("nsi", false),
+    ("NlaSvc", false),
+    ("iphlpsvc", false),
+    ("PolicyAgent", false),
+    ("RemoteAccess", false),
+    ("SharedAccess", false),
+    ("SSDPSRV", false),
+    ("WerSvc", false),
+];
+
+#[cfg(any(target_os = "windows", test))]
+fn parse_sc_states(text: &str) -> Vec<(String, String, bool)> {
+    let mut name: Option<String> = None;
+    let mut display = String::new();
+    let mut found = Vec::new();
+    for line in text.lines() {
+        let line = line.trim().trim_start_matches('\u{feff}');
+        if line.is_empty() {
+            continue;
+        }
+        let Some((key, value)) = line.split_once(':') else {
+            continue;
+        };
+        let key = key.trim();
+        let value = value.trim();
+        if key.eq_ignore_ascii_case("SERVICE_NAME") || key == "服务名" {
+            name = Some(value.to_string());
+            display.clear();
+            continue;
+        }
+        if name.is_none() {
+            continue;
+        }
+        if key.eq_ignore_ascii_case("DISPLAY_NAME") || key == "显示名称" {
+            display = value.to_string();
+            continue;
+        }
+        if key.eq_ignore_ascii_case("STATE") || key == "状态" {
+            let running = sc_state_running(value);
+            found.push((name.take().unwrap_or_default(), display.clone(), running));
+            display.clear();
+        }
+    }
+    found
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn sc_state_running(value: &str) -> bool {
+    let upper = value.to_ascii_uppercase();
+    if upper.contains("RUNNING") || value.contains("正在运行") {
+        return true;
+    }
+    value.split_whitespace().next() == Some("4")
 }
 
 #[cfg(target_os = "windows")]
@@ -1154,6 +1351,54 @@ ERR\tfirewall\tunknown\tdenied
         assert_eq!(sample.services[2].health, Health::Off);
         assert!(sample.services[2].detail.contains("未安装"));
         assert!(sample.error.unwrap().contains("denied"));
+    }
+
+    #[test]
+    fn powershell_utf16_report_is_readable() {
+        let text = "AV\tMicrosoft Defender\ton\trealtime fresh|\nSVC\tWinDefend\trun\tAutomatic|Defender\n";
+        let mut bytes = vec![0xFF, 0xFE];
+        for unit in text.encode_utf16() {
+            bytes.extend_from_slice(&unit.to_le_bytes());
+        }
+        let sample = parse_windows_report(&decode_command_output(&bytes));
+        assert_eq!(sample.av.len(), 1);
+        assert_eq!(sample.av[0].health, Health::On);
+        assert_eq!(sample.services.len(), 1);
+        assert_eq!(sample.services[0].health, Health::On);
+    }
+
+    #[test]
+    fn sc_query_marks_running_services() {
+        let text = "\
+SERVICE_NAME: WinDefend
+DISPLAY_NAME: Microsoft Defender Antivirus Service
+        TYPE               : 10  WIN32_OWN_PROCESS
+        STATE              : 4  RUNNING
+
+SERVICE_NAME: wuauserv
+DISPLAY_NAME: Windows Update
+        STATE              : 1  STOPPED
+
+SERVICE_NAME: EventLog
+        状态               : 4  RUNNING
+";
+        let rows = rows_from_sc(text);
+        let defend = rows
+            .iter()
+            .find(|row| row.name.contains("Defender"))
+            .unwrap();
+        assert_eq!(defend.health, Health::On);
+        let update = rows.iter().find(|row| row.name == "Windows 更新").unwrap();
+        assert_eq!(update.health, Health::Off);
+        let log = rows.iter().find(|row| row.name == "事件日志").unwrap();
+        assert_eq!(log.health, Health::On);
+        let firewall = rows
+            .iter()
+            .find(|row| row.name == "Windows 防火墙服务")
+            .unwrap();
+        assert_eq!(firewall.health, Health::Off);
+        assert!(firewall.detail.contains("未安装"));
+        assert!(rows.len() >= 7);
     }
 
     #[test]

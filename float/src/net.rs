@@ -14,6 +14,8 @@ pub struct AppNet {
     pub name: String,
     pub rx_bps: u64,
     pub tx_bps: u64,
+    /// 没有按应用的字节速率时，用当前连接数表示这个程序在联网。
+    pub conns: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -228,6 +230,7 @@ pub fn finish_block(header: &str, lines: &[String], is_delta: bool, elapsed: f64
                     name,
                     rx_bps: rx,
                     tx_bps: tx,
+                    conns: 0,
                 });
             }
         }
@@ -406,11 +409,40 @@ fn parse_netstat(text: &str) -> NetSample {
     if ports.len() > 500 {
         ports.truncate(500);
     }
+    let apps = apps_from_ports(&ports);
     NetSample {
-        apps: Vec::new(),
+        apps,
         ports,
         error: None,
     }
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn apps_from_ports(ports: &[PortRow]) -> Vec<AppNet> {
+    let mut counts: std::collections::BTreeMap<u32, (u32, u32)> = std::collections::BTreeMap::new();
+    for port in ports {
+        if port.pid == 0 {
+            continue;
+        }
+        let entry = counts.entry(port.pid).or_insert((0, 0));
+        if port.state == "listen" {
+            entry.1 += 1;
+        } else {
+            entry.0 += 1;
+        }
+    }
+    let mut apps: Vec<AppNet> = counts
+        .into_iter()
+        .map(|(pid, (active, listen))| AppNet {
+            pid,
+            name: "进程".into(),
+            rx_bps: 0,
+            tx_bps: 0,
+            conns: if active > 0 { active } else { listen },
+        })
+        .collect();
+    apps.sort_by(|a, b| b.conns.cmp(&a.conns).then(a.pid.cmp(&b.pid)));
+    apps
 }
 
 #[cfg(any(target_os = "windows", test))]
@@ -558,8 +590,11 @@ Active Connections
 ";
         let sample = parse_netstat(text);
         assert!(sample.error.is_none());
-        assert!(sample.apps.is_empty());
         assert_eq!(sample.ports.len(), 5);
+        let chrome = sample.apps.iter().find(|app| app.pid == 4567).unwrap();
+        assert_eq!(chrome.conns, 1);
+        let udp = sample.apps.iter().find(|app| app.pid == 2100).unwrap();
+        assert_eq!(udp.conns, 2);
         let listen = sample.ports.iter().find(|row| row.pid == 1232).unwrap();
         assert_eq!(listen.proto, "TCP");
         assert_eq!(listen.local_port, "135");

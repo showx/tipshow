@@ -603,11 +603,13 @@ impl FloatApp {
             }
         });
         let rows = visible_apps(snap, &self.net_query, self.app_sort);
-        ui.label(
-            RichText::new(format!("有流量的应用 {}", rows.len()))
-                .color(MUTED)
-                .size(11.0),
-        );
+        let has_rates = rows.iter().any(|row| row.rx_bps + row.tx_bps > 0);
+        let heading = if has_rates {
+            format!("有流量的应用 {}", rows.len())
+        } else {
+            format!("有连接的应用 {}", rows.len())
+        };
+        ui.label(RichText::new(heading).color(MUTED).size(11.0));
         let row_h = 30.0;
         let list_h = (ui.available_height() - 150.0).max(120.0);
         egui::ScrollArea::vertical()
@@ -621,13 +623,15 @@ impl FloatApp {
             });
         if rows.is_empty() {
             ui.label(
-                RichText::new(if cfg!(target_os = "windows") {
-                    "Windows 不按应用统计实时上下行，各网卡速率在下面。每个程序的连接在「端口」页。"
-                } else {
-                    "这一秒没有应用在传数据，或仍在等待 nettop 的第二次采样。"
-                })
-                .color(MUTED)
-                .size(12.0),
+                RichText::new("这一秒没有应用在传数据，或仍在等待下一次采样。")
+                    .color(MUTED)
+                    .size(12.0),
+            );
+        } else if !has_rates {
+            ui.label(
+                RichText::new("这里按连接数排列。网卡的实时上下行在下面。")
+                    .color(MUTED)
+                    .size(11.0),
             );
         }
         ui.add_space(6.0);
@@ -1248,11 +1252,19 @@ fn visible_apps<'a>(snap: &'a Snapshot, query: &str, sort: AppSort) -> Vec<&'a c
         .apps
         .iter()
         .filter(|row| app_matches(query, row))
-        .filter(|row| !query.trim().is_empty() || row.rx_bps + row.tx_bps > 0)
+        .filter(|row| !query.trim().is_empty() || row.rx_bps + row.tx_bps > 0 || row.conns > 0)
         .collect();
     rows.sort_by(|a, b| match sort {
-        AppSort::Down => b.rx_bps.cmp(&a.rx_bps).then(b.tx_bps.cmp(&a.tx_bps)),
-        AppSort::Up => b.tx_bps.cmp(&a.tx_bps).then(b.rx_bps.cmp(&a.rx_bps)),
+        AppSort::Down => b
+            .rx_bps
+            .cmp(&a.rx_bps)
+            .then(b.conns.cmp(&a.conns))
+            .then(b.tx_bps.cmp(&a.tx_bps)),
+        AppSort::Up => b
+            .tx_bps
+            .cmp(&a.tx_bps)
+            .then(b.conns.cmp(&a.conns))
+            .then(b.rx_bps.cmp(&a.rx_bps)),
     });
     rows
 }
@@ -1274,8 +1286,15 @@ fn app_row(ui: &mut egui::Ui, snap: &Snapshot, row: &crate::net::AppNet, height:
             .rect_filled(rect, CornerRadius::same(6), Color32::from_white_alpha(12));
     }
     let name = proc_name(snap, row.pid, &row.name);
-    let name_rect =
-        egui::Rect::from_min_max(rect.left_top(), pos2(rect.right() - 196.0, rect.bottom()));
+    let name_right = if row.rx_bps == 0 && row.tx_bps == 0 && row.conns > 0 {
+        108.0
+    } else {
+        196.0
+    };
+    let name_rect = egui::Rect::from_min_max(
+        rect.left_top(),
+        pos2(rect.right() - name_right, rect.bottom()),
+    );
     ui.painter_at(name_rect).text(
         name_rect.left_center() + vec2(4.0, 0.0),
         Align2::LEFT_CENTER,
@@ -1283,20 +1302,30 @@ fn app_row(ui: &mut egui::Ui, snap: &Snapshot, row: &crate::net::AppNet, height:
         FontId::proportional(13.0),
         TEXT,
     );
-    ui.painter().text(
-        pos2(rect.right() - 104.0, rect.center().y),
-        Align2::RIGHT_CENTER,
-        format!("↓ {}", monitor::fmt_rate(row.rx_bps)),
-        FontId::proportional(12.5),
-        DOWN,
-    );
-    ui.painter().text(
-        pos2(rect.right() - 4.0, rect.center().y),
-        Align2::RIGHT_CENTER,
-        format!("↑ {}", monitor::fmt_rate(row.tx_bps)),
-        FontId::proportional(12.5),
-        UP,
-    );
+    if row.rx_bps == 0 && row.tx_bps == 0 && row.conns > 0 {
+        ui.painter().text(
+            pos2(rect.right() - 4.0, rect.center().y),
+            Align2::RIGHT_CENTER,
+            format!("{} 个连接", row.conns),
+            FontId::proportional(12.5),
+            TEXT,
+        );
+    } else {
+        ui.painter().text(
+            pos2(rect.right() - 104.0, rect.center().y),
+            Align2::RIGHT_CENTER,
+            format!("↓ {}", monitor::fmt_rate(row.rx_bps)),
+            FontId::proportional(12.5),
+            DOWN,
+        );
+        ui.painter().text(
+            pos2(rect.right() - 4.0, rect.center().y),
+            Align2::RIGHT_CENTER,
+            format!("↑ {}", monitor::fmt_rate(row.tx_bps)),
+            FontId::proportional(12.5),
+            UP,
+        );
+    }
 }
 
 fn visible_ports<'a>(
