@@ -34,6 +34,7 @@ enum Tab {
     Procs,
     Net,
     Ports,
+    Security,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -47,6 +48,13 @@ enum PortFilter {
     Active,
     Listen,
     All,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SecurityFilter {
+    All,
+    On,
+    Off,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -72,6 +80,8 @@ pub struct FloatApp {
     net_query: String,
     app_sort: AppSort,
     port_filter: PortFilter,
+    security_query: String,
+    security_filter: SecurityFilter,
 }
 
 impl FloatApp {
@@ -86,6 +96,7 @@ impl FloatApp {
             "进程" | "procs" => Tab::Procs,
             "流量" | "net" => Tab::Net,
             "端口" | "ports" => Tab::Ports,
+            "安全" | "security" => Tab::Security,
             _ => Tab::Overview,
         };
         Self {
@@ -104,6 +115,8 @@ impl FloatApp {
             net_query: String::new(),
             app_sort: AppSort::Down,
             port_filter: PortFilter::Active,
+            security_query: String::new(),
+            security_filter: SecurityFilter::All,
         }
     }
 
@@ -248,14 +261,34 @@ impl FloatApp {
             self.toggle_expanded();
         }
         response.context_menu(|ui| self.context_menu(ui));
+        let alert_hint = self.snap.as_ref().and_then(|snap| {
+            if snap.alerts.is_empty() {
+                None
+            } else {
+                Some(format!(
+                    "有 {} 条安全风险：{}",
+                    snap.alerts.len(),
+                    crate::guard::display_title(&snap.alerts[0])
+                ))
+            }
+        });
         response
             .on_hover_cursor(egui::CursorIcon::Grab)
-            .on_hover_text("点击展开详情，拖拽移动。右键可置顶或退出");
+            .on_hover_text(
+                alert_hint
+                    .as_deref()
+                    .unwrap_or("点击展开详情，拖拽移动。右键可置顶或退出"),
+            );
 
         let painter = ui.painter();
         let center_y = rect.center().y;
         if let Some(snap) = &self.snap {
-            painter.circle_filled(pos2(rect.left() + 22.0, center_y), 4.0, DOWN);
+            let dot = if snap.alerts.is_empty() {
+                DOWN
+            } else {
+                Color32::from_rgb(248, 113, 113)
+            };
+            painter.circle_filled(pos2(rect.left() + 22.0, center_y), 4.0, dot);
             painter.text(
                 pos2(rect.left() + 36.0, center_y - 12.0),
                 Align2::LEFT_CENTER,
@@ -320,6 +353,7 @@ impl FloatApp {
             Tab::Procs => self.procs(ui),
             Tab::Net => self.traffic(ui),
             Tab::Ports => self.ports(ui),
+            Tab::Security => self.security(ui),
         }
     }
 
@@ -375,13 +409,23 @@ impl FloatApp {
     }
 
     fn tab_bar(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
+            let security_label = if self
+                .snap
+                .as_ref()
+                .is_some_and(|snap| !snap.alerts.is_empty())
+            {
+                "安全 !"
+            } else {
+                "安全"
+            };
             for (tab, label) in [
                 (Tab::Overview, "总览"),
                 (Tab::Procs, "进程"),
                 (Tab::Net, "流量"),
                 (Tab::Ports, "端口"),
+                (Tab::Security, security_label),
             ] {
                 if tab_button(ui, label, self.tab == tab).clicked() {
                     self.tab = tab;
@@ -400,6 +444,11 @@ impl FloatApp {
             .max_height(ui.available_height())
             .show(ui, |ui| {
                 stat_row(ui, snap);
+                if snap.security_ready {
+                    ui.add_space(8.0);
+                    section_label(ui, "安全");
+                    security_glance(ui, snap);
+                }
                 ui.add_space(8.0);
                 section_label(
                     ui,
@@ -567,9 +616,13 @@ impl FloatApp {
             });
         if rows.is_empty() {
             ui.label(
-                RichText::new("这一秒没有应用在传数据，或仍在等待 nettop 的第二次采样。")
-                    .color(MUTED)
-                    .size(12.0),
+                RichText::new(if cfg!(target_os = "windows") {
+                    "Windows 不按应用统计实时上下行，各网卡速率在下面。每个程序的连接在「端口」页。"
+                } else {
+                    "这一秒没有应用在传数据，或仍在等待 nettop 的第二次采样。"
+                })
+                .color(MUTED)
+                .size(12.0),
             );
         }
         ui.add_space(6.0);
@@ -632,6 +685,147 @@ impl FloatApp {
             });
     }
 
+    fn security(&mut self, ui: &mut egui::Ui) {
+        if self.snap.is_none() {
+            ui.label(RichText::new("正在采集系统数据…").color(MUTED));
+            return;
+        }
+        self.guard_panel(ui);
+        let Some(snap) = &self.snap else {
+            return;
+        };
+        if !snap.security_ready {
+            ui.label(RichText::new("正在检测杀毒软件和服务…").color(MUTED));
+            return;
+        }
+        security_summary(ui, snap);
+        ui.add_space(6.0);
+        if let Some(err) = &snap.security_error {
+            ui.label(
+                RichText::new(err)
+                    .color(Color32::from_rgb(248, 113, 113))
+                    .size(12.0),
+            );
+        }
+        ui.horizontal(|ui| {
+            let width = (ui.available_width() - 168.0).max(80.0);
+            ui.add(
+                egui::TextEdit::singleline(&mut self.security_query)
+                    .hint_text("搜索杀毒软件或服务")
+                    .desired_width(width),
+            );
+            if sort_button(ui, "全部", self.security_filter == SecurityFilter::All).clicked() {
+                self.security_filter = SecurityFilter::All;
+            }
+            if sort_button(ui, "开启", self.security_filter == SecurityFilter::On).clicked() {
+                self.security_filter = SecurityFilter::On;
+            }
+            if sort_button(ui, "关闭", self.security_filter == SecurityFilter::Off).clicked() {
+                self.security_filter = SecurityFilter::Off;
+            }
+        });
+        let query = self.security_query.clone();
+        let filter = self.security_filter;
+        let av = visible_checks(&snap.av, &query, filter);
+        let guards = visible_checks(&snap.guards, &query, filter);
+        let services = visible_checks(&snap.services, &query, filter);
+        egui::ScrollArea::vertical()
+            .id_salt("security")
+            .auto_shrink([false, false])
+            .max_height(ui.available_height())
+            .show(ui, |ui| {
+                if av.is_empty() && guards.is_empty() && services.is_empty() {
+                    ui.label(RichText::new("没有匹配的项目").color(MUTED));
+                    return;
+                }
+                if !av.is_empty() {
+                    section_label(ui, "杀毒软件");
+                    for row in av {
+                        check_row(ui, row);
+                    }
+                    ui.add_space(6.0);
+                } else if query.trim().is_empty() && filter == SecurityFilter::All {
+                    section_label(ui, "杀毒软件");
+                    ui.label(RichText::new("未检测到杀毒软件").color(MUTED).size(12.5));
+                    ui.add_space(6.0);
+                }
+                if !guards.is_empty() {
+                    section_label(ui, "安全开关");
+                    for row in guards {
+                        check_row(ui, row);
+                    }
+                    ui.add_space(6.0);
+                }
+                if !services.is_empty() {
+                    section_label(ui, "系统服务");
+                    for row in services {
+                        check_row(ui, row);
+                    }
+                }
+                ui.add_space(8.0);
+                ui.label(
+                    RichText::new(
+                        "文件和启动项实时监视。杀毒与服务约每 20 秒刷新，不需要管理员权限。",
+                    )
+                    .color(MUTED)
+                    .size(11.0),
+                );
+            });
+    }
+
+    fn guard_panel(&mut self, ui: &mut egui::Ui) {
+        let ready = self.snap.as_ref().is_some_and(|snap| snap.guard_ready);
+        let note = self
+            .snap
+            .as_ref()
+            .map(|snap| snap.guard_note.clone())
+            .unwrap_or_default();
+        let alerts = self
+            .snap
+            .as_ref()
+            .map(|snap| snap.alerts.clone())
+            .unwrap_or_default();
+        section_label(ui, "实时监视");
+        if !ready {
+            ui.label(RichText::new("正在建立监视基线…").color(MUTED).size(12.0));
+            ui.add_space(6.0);
+            return;
+        }
+        ui.add(egui::Label::new(RichText::new(note).color(MUTED).size(11.5)).truncate());
+        if alerts.is_empty() {
+            ui.label(
+                RichText::new("暂无批量加密、进程注入或启动项改动。")
+                    .color(DOWN)
+                    .size(12.5),
+            );
+        }
+        for alert in alerts {
+            let (rect, _) =
+                ui.allocate_exact_size(vec2(ui.available_width(), 62.0), Sense::hover());
+            ui.painter().rect_filled(rect, CornerRadius::same(8), CARD);
+            let inner = rect.shrink(8.0);
+            ui.scope_builder(UiBuilder::new().max_rect(inner), |ui| {
+                ui.set_width(inner.width());
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(crate::guard::display_title(&alert))
+                            .color(Color32::from_rgb(248, 113, 113))
+                            .size(13.0),
+                    );
+                    if tiny_button(ui, "忽略", false).clicked() {
+                        crate::guard::dismiss(&self.shared, alert.id);
+                    }
+                });
+                ui.add(
+                    egui::Label::new(RichText::new(&alert.detail).color(MUTED).size(11.0))
+                        .truncate(),
+                );
+            });
+            ui.add_space(4.0);
+        }
+        ui.add_space(6.0);
+    }
+
     fn context_menu(&mut self, ui: &mut egui::Ui) {
         let expand_label = if self.expanded { "收起" } else { "展开" };
         if ui.button(expand_label).clicked() {
@@ -686,7 +880,7 @@ fn tab_button(ui: &mut egui::Ui, text: &str, selected: bool) -> egui::Response {
         egui::Button::new(RichText::new(text).size(13.0).color(color))
             .fill(fill)
             .corner_radius(CornerRadius::same(8))
-            .min_size(vec2(68.0, 28.0)),
+            .min_size(vec2(56.0, 28.0)),
     )
 }
 
@@ -1238,6 +1432,235 @@ fn state_color(state: &str) -> Color32 {
         "established" => DOWN,
         "listen" => UP,
         _ => MUTED,
+    }
+}
+
+fn security_glance(ui: &mut egui::Ui, snap: &Snapshot) {
+    if let Some(alert) = snap.alerts.first() {
+        ui.add(
+            egui::Label::new(
+                RichText::new(format!(
+                    "{} 条风险  ·  {}",
+                    snap.alerts.len(),
+                    crate::guard::display_title(alert)
+                ))
+                .color(Color32::from_rgb(248, 113, 113))
+                .size(12.5),
+            )
+            .truncate(),
+        );
+    }
+    let av_line = if snap.av.is_empty() {
+        "未检测到杀毒软件".to_string()
+    } else {
+        snap.av
+            .iter()
+            .take(3)
+            .map(|row| format!("{} {}", row.name, row.status))
+            .collect::<Vec<_>>()
+            .join("   ·   ")
+    };
+    ui.add(egui::Label::new(RichText::new(av_line).color(TEXT).size(12.5)).truncate());
+    if !snap.guards.is_empty() {
+        let guard_line = snap
+            .guards
+            .iter()
+            .map(|row| format!("{} {}", glance_name(&row.name), row.status))
+            .collect::<Vec<_>>()
+            .join("   ·   ");
+        ui.add(egui::Label::new(RichText::new(guard_line).color(MUTED).size(11.5)).truncate());
+    }
+    let running = snap
+        .services
+        .iter()
+        .filter(|row| row.health == crate::security::Health::On)
+        .count();
+    ui.label(
+        RichText::new(format!(
+            "服务 {} 个运行中 / {}",
+            running,
+            snap.services.len()
+        ))
+        .color(MUTED)
+        .size(11.5),
+    );
+}
+
+fn glance_name(name: &str) -> &str {
+    match name {
+        "应用程序防火墙" => "防火墙",
+        "系统完整性保护" => "SIP",
+        "Windows 防火墙" => "防火墙",
+        other => other,
+    }
+}
+
+fn security_summary(ui: &mut egui::Ui, snap: &Snapshot) {
+    let gap = 8.0;
+    let width = ((ui.available_width() - gap * 2.0) / 3.0).max(40.0);
+    let av_on = count_on(&snap.av);
+    let guard_on = count_on(&snap.guards);
+    let svc_on = count_on(&snap.services);
+    let av_value = if snap.av.is_empty() {
+        "无".to_string()
+    } else {
+        av_on.to_string()
+    };
+    let av_sub = if snap.av.is_empty() {
+        "未检测到".to_string()
+    } else {
+        format!("已开启 / {}", snap.av.len())
+    };
+    let av_color = if snap.av.is_empty() || av_on == 0 {
+        DISK
+    } else {
+        DOWN
+    };
+    let guard_color = if snap.guards.is_empty() || guard_on == snap.guards.len() {
+        DOWN
+    } else {
+        DISK
+    };
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = gap;
+        summary_card(ui, width, "杀毒", &av_value, &av_sub, av_color);
+        summary_card(
+            ui,
+            width,
+            "防护",
+            &format!("{guard_on}/{}", snap.guards.len()),
+            "项已开启",
+            guard_color,
+        );
+        summary_card(
+            ui,
+            width,
+            "服务",
+            &svc_on.to_string(),
+            &format!("运行中 / {}", snap.services.len()),
+            DOWN,
+        );
+    });
+}
+
+fn count_on(rows: &[crate::security::CheckRow]) -> usize {
+    rows.iter()
+        .filter(|row| row.health == crate::security::Health::On)
+        .count()
+}
+
+fn summary_card(
+    ui: &mut egui::Ui,
+    width: f32,
+    title: &str,
+    value: &str,
+    sub: &str,
+    color: Color32,
+) {
+    let (rect, _) = ui.allocate_exact_size(vec2(width, 72.0), Sense::hover());
+    ui.painter().rect_filled(rect, CornerRadius::same(10), CARD);
+    let inner = rect.shrink(8.0);
+    ui.scope_builder(
+        UiBuilder::new()
+            .max_rect(inner)
+            .layout(egui::Layout::top_down(egui::Align::Min)),
+        |ui| {
+            ui.set_width(inner.width());
+            ui.spacing_mut().item_spacing.y = 1.0;
+            ui.label(RichText::new(title).color(MUTED).size(11.5));
+            ui.label(RichText::new(value).color(color).size(20.0));
+            ui.add(egui::Label::new(RichText::new(sub).color(MUTED).size(10.5)).truncate());
+        },
+    );
+}
+
+fn visible_checks<'a>(
+    rows: &'a [crate::security::CheckRow],
+    query: &str,
+    filter: SecurityFilter,
+) -> Vec<&'a crate::security::CheckRow> {
+    rows.iter()
+        .filter(|row| check_visible(row, query, filter))
+        .collect()
+}
+
+fn check_visible(row: &crate::security::CheckRow, query: &str, filter: SecurityFilter) -> bool {
+    let health_ok = match filter {
+        SecurityFilter::All => true,
+        SecurityFilter::On => row.health == crate::security::Health::On,
+        SecurityFilter::Off => matches!(
+            row.health,
+            crate::security::Health::Off
+                | crate::security::Health::Mixed
+                | crate::security::Health::Unknown
+        ),
+    };
+    if !health_ok {
+        return false;
+    }
+    let query = query.trim();
+    if query.is_empty() {
+        return true;
+    }
+    let needle = query.to_ascii_lowercase();
+    row.name.to_ascii_lowercase().contains(&needle)
+        || row.detail.to_ascii_lowercase().contains(&needle)
+        || row.status.contains(query)
+}
+
+fn check_row(ui: &mut egui::Ui, row: &crate::security::CheckRow) {
+    let height = if row.detail.is_empty() { 34.0 } else { 50.0 };
+    let (rect, response) =
+        ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::hover());
+    if response.hovered() {
+        ui.painter()
+            .rect_filled(rect, CornerRadius::same(8), Color32::from_white_alpha(18));
+    } else {
+        ui.painter().rect_filled(rect, CornerRadius::same(8), CARD);
+    }
+    let color = health_color(row);
+    let name_rect = egui::Rect::from_min_max(
+        rect.left_top(),
+        pos2(rect.right() - 72.0, rect.top() + 28.0),
+    );
+    ui.painter_at(name_rect).text(
+        pos2(rect.left() + 10.0, rect.top() + 16.0),
+        Align2::LEFT_CENTER,
+        &row.name,
+        FontId::proportional(13.0),
+        TEXT,
+    );
+    ui.painter().text(
+        pos2(rect.right() - 10.0, rect.top() + 16.0),
+        Align2::RIGHT_CENTER,
+        &row.status,
+        FontId::proportional(12.0),
+        color,
+    );
+    if !row.detail.is_empty() {
+        let detail_rect = egui::Rect::from_min_max(
+            pos2(rect.left() + 10.0, rect.top() + 26.0),
+            pos2(rect.right() - 10.0, rect.bottom()),
+        );
+        ui.painter_at(detail_rect).text(
+            pos2(rect.left() + 10.0, rect.bottom() - 12.0),
+            Align2::LEFT_CENTER,
+            &row.detail,
+            FontId::proportional(11.0),
+            MUTED,
+        );
+    }
+    response.on_hover_text(format!("{}\n{}", row.status, row.detail));
+    ui.add_space(4.0);
+}
+
+fn health_color(row: &crate::security::CheckRow) -> Color32 {
+    match row.health {
+        crate::security::Health::On => DOWN,
+        crate::security::Health::Mixed => DISK,
+        crate::security::Health::Unknown => MUTED,
+        crate::security::Health::Off if row.critical => DISK,
+        crate::security::Health::Off => MUTED,
     }
 }
 

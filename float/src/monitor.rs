@@ -68,6 +68,14 @@ pub struct Snapshot {
     pub apps: Vec<AppNet>,
     pub ports: Vec<PortRow>,
     pub net_error: Option<String>,
+    pub av: Vec<crate::security::CheckRow>,
+    pub guards: Vec<crate::security::CheckRow>,
+    pub services: Vec<crate::security::CheckRow>,
+    pub security_error: Option<String>,
+    pub security_ready: bool,
+    pub alerts: Vec<crate::guard::Alert>,
+    pub guard_ready: bool,
+    pub guard_note: String,
     pub cpu_hist: Vec<f32>,
     pub rx_hist: Vec<f32>,
     pub tx_hist: Vec<f32>,
@@ -77,6 +85,9 @@ pub struct Shared {
     pub latest: Mutex<Option<Snapshot>>,
     pub net: Arc<Mutex<NetSample>>,
     pub nettop_pid: Arc<AtomicU32>,
+    pub security: Mutex<crate::security::SecuritySample>,
+    pub guard: Mutex<crate::guard::GuardView>,
+    pub guard_dismiss: Mutex<Vec<u64>>,
 }
 
 impl Shared {
@@ -85,6 +96,9 @@ impl Shared {
             latest: Mutex::new(None),
             net: Arc::new(Mutex::new(NetSample::default())),
             nettop_pid: Arc::new(AtomicU32::new(0)),
+            security: Mutex::new(crate::security::SecuritySample::default()),
+            guard: Mutex::new(crate::guard::GuardView::default()),
+            guard_dismiss: Mutex::new(Vec::new()),
         }
     }
 }
@@ -143,6 +157,20 @@ fn sample_loop(shared: Arc<Shared>, ctx: egui::Context) {
             snap.apps = net.apps.clone();
             snap.ports = net.ports.clone();
             snap.net_error = net.error.clone();
+        }
+        {
+            let security = lock(&shared.security);
+            snap.av = security.av.clone();
+            snap.guards = security.guards.clone();
+            snap.services = security.services.clone();
+            snap.security_error = security.error.clone();
+            snap.security_ready = security.ready;
+        }
+        {
+            let guard = lock(&shared.guard);
+            snap.alerts = guard.alerts.clone();
+            snap.guard_ready = guard.ready;
+            snap.guard_note = guard.note.clone();
         }
         if seq == 1 {
             eprintln!(
@@ -230,6 +258,14 @@ fn build_snapshot(
         apps: Vec::new(),
         ports: Vec::new(),
         net_error: None,
+        av: Vec::new(),
+        guards: Vec::new(),
+        services: Vec::new(),
+        security_error: None,
+        security_ready: false,
+        alerts: Vec::new(),
+        guard_ready: false,
+        guard_note: String::new(),
         cpu_hist: cpu_hist.iter().copied().collect(),
         rx_hist: rx_hist.iter().copied().collect(),
         tx_hist: tx_hist.iter().copied().collect(),

@@ -3,8 +3,10 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod guard;
 mod monitor;
 mod net;
+mod security;
 
 use std::sync::Arc;
 
@@ -22,13 +24,14 @@ fn main() -> eframe::Result {
 tipshow 悬浮窗
 
 用法:
-  tipshow-float [--expanded] [--tab 总览|进程|流量|端口]
+  tipshow-float [--expanded] [--tab 总览|进程|流量|端口|安全]
 
 收起时显示 CPU、内存和实时上下行，拖拽移动，点击展开。
-展开后可查看进程、每个应用的上传下载、端口和磁盘。窗口默认置顶。
+展开后可查看进程、每个应用的上传下载、端口、磁盘、杀毒和服务状态。
+文档目录、进程注入迹象和启动项会实时监视，发现异常立刻提示。窗口默认置顶。
 
   --expanded    启动时直接展开详情
-  --tab 流量    打开指定页：总览、进程、流量、端口
+  --tab 安全    打开指定页：总览、进程、流量、端口、安全
   Esc           收起
   ⌘Q / Ctrl+Q   退出
 "
@@ -69,6 +72,8 @@ tipshow 悬浮窗
                 Arc::clone(&shared_bg.nettop_pid),
                 cc.egui_ctx.clone(),
             );
+            security::spawn(Arc::clone(&shared_bg), cc.egui_ctx.clone());
+            guard::spawn(Arc::clone(&shared_bg), cc.egui_ctx.clone());
             Ok(Box::new(app::FloatApp::new(
                 cc,
                 shared,
