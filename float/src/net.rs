@@ -383,6 +383,7 @@ fn sample_netstat() -> Result<NetSample, String> {
     Ok(parse_netstat(&text))
 }
 
+#[cfg(any(target_os = "windows", test))]
 fn parse_netstat(text: &str) -> NetSample {
     let mut ports = Vec::new();
     for line in text.lines() {
@@ -412,6 +413,7 @@ fn parse_netstat(text: &str) -> NetSample {
     }
 }
 
+#[cfg(any(target_os = "windows", test))]
 fn parse_netstat_line(line: &str) -> Option<PortRow> {
     let mut fields = line.split_whitespace();
     let proto_raw = fields.next()?;
@@ -459,6 +461,7 @@ fn parse_netstat_line(line: &str) -> Option<PortRow> {
     })
 }
 
+#[cfg(any(target_os = "windows", test))]
 fn split_netstat_addr(addr: &str) -> (String, String) {
     if let Some((host, port)) = addr.rsplit_once("]:") {
         return (host.trim_start_matches('[').to_string(), port.to_string());
@@ -469,6 +472,7 @@ fn split_netstat_addr(addr: &str) -> (String, String) {
     (addr.to_string(), "*".into())
 }
 
+#[cfg(any(target_os = "windows", test))]
 fn normalize_netstat_state(state: &str) -> &'static str {
     match state.to_ascii_lowercase().as_str() {
         "listening" => "listen",

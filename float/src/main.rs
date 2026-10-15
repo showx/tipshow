@@ -4,6 +4,7 @@
 
 mod app;
 mod guard;
+mod icon;
 mod monitor;
 mod net;
 mod security;
@@ -66,6 +67,8 @@ tipshow 悬浮窗
         Box::new(move |cc| {
             install_fonts(&cc.egui_ctx);
             install_style(&cc.egui_ctx);
+            #[cfg(target_os = "macos")]
+            icon::set_dock_icon();
             monitor::spawn(Arc::clone(&shared_bg), cc.egui_ctx.clone());
             net::spawn(
                 Arc::clone(&shared_bg.net),
@@ -98,7 +101,8 @@ fn viewport(start_expanded: bool) -> egui::ViewportBuilder {
         .with_has_shadow(false)
         .with_resizable(start_expanded)
         .with_always_on_top()
-        .with_taskbar(true);
+        .with_taskbar(true)
+        .with_icon(icon::icon_data());
     #[cfg(target_os = "macos")]
     {
         viewport = viewport

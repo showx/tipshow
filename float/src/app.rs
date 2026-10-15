@@ -372,8 +372,13 @@ impl FloatApp {
                 self.toggle_expanded();
             }
             drag.context_menu(|ui| self.context_menu(ui));
+            crate::icon::paint_mark(
+                ui.painter(),
+                drag_rect.left_center() + vec2(11.0, 0.0),
+                20.0,
+            );
             ui.painter().text(
-                drag_rect.left_center(),
+                drag_rect.left_center() + vec2(26.0, 0.0),
                 Align2::LEFT_CENTER,
                 "tipshow",
                 FontId::proportional(16.0),
